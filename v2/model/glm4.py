@@ -76,8 +76,8 @@ class PartialRotaryEmbedding(nn.Module):
         x: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        cos = self.cos_cached[position_ids]
-        sin = self.sin_cached[position_ids]
+        cos = self.cos_cached[position_ids].to(x.dtype)
+        sin = self.sin_cached[position_ids].to(x.dtype)
         return cos.unsqueeze(1), sin.unsqueeze(1)
 
 

@@ -41,6 +41,8 @@ def main():
                         help="Input prompt")
     parser.add_argument("--debug-weights", action="store_true",
                         help="Debug weight loading")
+    parser.add_argument("--max-layers", type=int, default=None,
+                        help="Limit number of layers (for memory-constrained testing)")
     args = parser.parse_args()
 
     # Clean up GPU memory
@@ -64,6 +66,12 @@ def main():
 
     # Config
     config = GLM4AirConfig()
+
+    # Optionally limit layers for memory-constrained testing
+    if args.max_layers is not None:
+        config.num_layers = min(args.max_layers, config.num_layers)
+        print(f"  Limited to {config.num_layers} layers for testing")
+
     cache_config = ExpertCacheConfig(
         pinned_slots=0,
         hot_slots=args.slots // 2 + args.slots % 2,
@@ -129,6 +137,11 @@ def main():
 
     del weights
     gc.collect()
+    torch.cuda.empty_cache()
+
+    # Move model to GPU and convert to correct dtype
+    print("  Moving model to GPU...")
+    model.to(device=device, dtype=dtype)
     torch.cuda.empty_cache()
     print(f"  After weight load: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 
