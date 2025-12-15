@@ -81,6 +81,142 @@ class MixtralConfig:
 
 
 @dataclass
+class GLM4AirConfig:
+    """
+    GLM-4.5-Air MoE architecture config.
+
+    106B total params, ~12B active. Uses sigmoid routing with top-8.
+    First layer is dense, remaining 45 are MoE.
+    """
+    # Model architecture (frozen - matches HuggingFace weights)
+    hidden_dim: int = 4096
+    num_layers: int = 46  # 1 dense + 45 MoE
+    num_attention_heads: int = 96
+    num_kv_heads: int = 8  # GQA: 12 queries per KV head
+    head_dim: int = 128
+    intermediate_dim: int = 10944  # Dense FFN / shared expert
+    moe_intermediate_dim: int = 1408  # Routed expert intermediate
+    vocab_size: int = 151552
+
+    # MoE config (frozen)
+    num_experts: int = 128  # Routed experts per MoE layer
+    num_shared_experts: int = 1  # Shared expert (always active)
+    experts_per_token: int = 8  # Top-8 sigmoid routing
+    first_k_dense_replace: int = 1  # First N layers are dense (no MoE)
+
+    # Router config
+    n_group: int = 1  # Expert grouping for hierarchical routing
+    topk_group: int = 1  # Groups to select before expert selection
+    norm_topk_prob: bool = True  # Normalize routing weights
+    routed_scaling_factor: float = 1.0
+
+    # RoPE (frozen)
+    rope_theta: float = 1000000.0
+    max_position_embeddings: int = 131072  # 128K context
+    partial_rotary_factor: float = 0.5  # Partial RoPE
+
+    # Normalization (frozen)
+    rms_norm_eps: float = 1e-5
+
+    # Attention
+    attention_bias: bool = True
+    use_qk_norm: bool = False
+
+    @property
+    def num_moe_layers(self) -> int:
+        """Number of MoE layers (excludes dense layers)."""
+        return self.num_layers - self.first_k_dense_replace
+
+    @property
+    def expert_params(self) -> int:
+        """Parameters per routed expert (gate + up + down)."""
+        # GLM4 uses fused gate_up, but we count separately
+        return 3 * self.hidden_dim * self.moe_intermediate_dim
+
+    @property
+    def expert_size_bytes_fp16(self) -> int:
+        """Expert size in bytes (fp16)."""
+        return self.expert_params * 2
+
+    @property
+    def expert_size_bytes(self) -> int:
+        """Expert size in bytes (fp16) - for cache manager compatibility."""
+        return self.expert_params * 2
+
+    @property
+    def expert_size_bytes_int4(self) -> int:
+        """Expert size in bytes (INT4 + scales)."""
+        # INT4 packed (half the weight bytes) + fp16 scales
+        packed = self.expert_params // 2
+        # Scales: one per group (assume group_size=128)
+        num_groups = self.expert_params // 128
+        scales = num_groups * 2  # fp16
+        return packed + scales
+
+    @property
+    def expert_size_mb(self) -> float:
+        """Expert size in MB (INT4)."""
+        return self.expert_size_bytes_int4 / (1024 * 1024)
+
+    @property
+    def shared_expert_params(self) -> int:
+        """Parameters for shared expert (larger intermediate)."""
+        return 3 * self.hidden_dim * self.intermediate_dim * self.num_shared_experts
+
+    @property
+    def total_routed_experts(self) -> int:
+        """Total routed experts across all MoE layers."""
+        return self.num_moe_layers * self.num_experts
+
+    @property
+    def total_params_b(self) -> float:
+        """Total parameters in billions."""
+        # Embeddings
+        embed = self.vocab_size * self.hidden_dim * 2  # embed + lm_head
+
+        # Attention per layer (Q, K, V, O + biases)
+        attn_per_layer = (
+            self.hidden_dim * self.num_attention_heads * self.head_dim +  # Q
+            self.hidden_dim * self.num_kv_heads * self.head_dim +  # K
+            self.hidden_dim * self.num_kv_heads * self.head_dim +  # V
+            self.num_attention_heads * self.head_dim * self.hidden_dim  # O
+        )
+
+        # Dense layer FFN
+        dense_ffn = self.first_k_dense_replace * 3 * self.hidden_dim * self.intermediate_dim
+
+        # MoE layers: routed experts + shared expert + router
+        moe_experts = self.num_moe_layers * self.num_experts * self.expert_params
+        moe_shared = self.num_moe_layers * self.shared_expert_params
+        moe_router = self.num_moe_layers * self.hidden_dim * self.num_experts
+
+        # Layer norms
+        norms = self.num_layers * self.hidden_dim * 4  # input_norm, post_attn, etc.
+
+        total = embed + self.num_layers * attn_per_layer + dense_ffn + moe_experts + moe_shared + moe_router + norms
+        return total / 1e9
+
+    @property
+    def active_params_b(self) -> float:
+        """Active parameters per forward pass in billions."""
+        # Same as total but only top-k experts per MoE layer
+        embed = self.vocab_size * self.hidden_dim * 2
+        attn = self.num_layers * (
+            self.hidden_dim * self.num_attention_heads * self.head_dim +
+            self.hidden_dim * self.num_kv_heads * self.head_dim * 2 +
+            self.num_attention_heads * self.head_dim * self.hidden_dim
+        )
+        dense_ffn = self.first_k_dense_replace * 3 * self.hidden_dim * self.intermediate_dim
+        # Only top-k experts active
+        active_experts = self.num_moe_layers * self.experts_per_token * self.expert_params
+        shared = self.num_moe_layers * self.shared_expert_params
+        router = self.num_moe_layers * self.hidden_dim * self.num_experts
+
+        total = embed + attn + dense_ffn + active_experts + shared + router
+        return total / 1e9
+
+
+@dataclass
 class DraftConfig:
     """
     Mistral-7B-Instruct-v0.2 (draft model) config.
