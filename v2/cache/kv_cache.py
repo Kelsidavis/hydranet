@@ -11,12 +11,12 @@ Phase 1 (SimpleKVCache): Preallocated fp16, no paging, fixed max length.
 
 import torch
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 from collections import OrderedDict
 import threading
 import time
 
-from ..config import KVCacheConfig, MixtralConfig
+from ..config import KVCacheConfig, MixtralConfig, GLM4AirConfig
 
 
 # =============================================================================
@@ -172,13 +172,13 @@ class SimpleKVCache:
     @classmethod
     def from_model_config(
         cls,
-        model_config: MixtralConfig,
+        model_config: Union[MixtralConfig, GLM4AirConfig],
         max_seq_len: int = 2048,
         batch_size: int = 1,
         device: torch.device = torch.device("cuda"),
         dtype: torch.dtype = torch.float16,
     ) -> "SimpleKVCache":
-        """Create KV cache from model config."""
+        """Create KV cache from model config (Mixtral or GLM4)."""
         return cls(
             num_layers=model_config.num_layers,
             num_kv_heads=model_config.num_kv_heads,
@@ -292,7 +292,7 @@ class PerLayerKVCache:
         self,
         layer_idx: int,
         config: KVCacheConfig,
-        model_config: MixtralConfig,
+        model_config: Union[MixtralConfig, GLM4AirConfig],
         landmark_tracker: LandmarkTracker,
         device: torch.device,
         dtype: torch.dtype,
@@ -579,7 +579,7 @@ class KVPageManager:
 
     def __init__(
         self,
-        model_config: MixtralConfig,
+        model_config: Union[MixtralConfig, GLM4AirConfig],
         kv_config: KVCacheConfig,
         device: torch.device = torch.device("cuda"),
         dtype: torch.dtype = torch.float16,

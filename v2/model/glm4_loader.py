@@ -100,8 +100,12 @@ class GLM4WeightLoader:
         return self._get_tensor("model.embed_tokens.weight")
 
     def load_lm_head(self) -> torch.Tensor:
-        """Load LM head weights."""
-        return self._get_tensor("lm_head.weight")
+        """Load LM head weights. May be tied to embeddings."""
+        # Try lm_head first, fall back to embeddings if tied
+        tensor = self._get_tensor_if_exists("lm_head.weight")
+        if tensor is None:
+            tensor = self._get_tensor("model.embed_tokens.weight")
+        return tensor
 
     def load_final_norm(self) -> torch.Tensor:
         """Load final layer norm weights."""
@@ -151,12 +155,13 @@ class GLM4WeightLoader:
 
     def load_router(self, layer_idx: int) -> Dict[str, torch.Tensor]:
         """Load router gate weights for a MoE layer."""
+        # HF uses "mlp.gate", we map to model's "mlp.router"
         prefix = f"model.layers.{layer_idx}.mlp.gate"
         weights = {}
 
         weights["weight"] = self._get_tensor(f"{prefix}.weight")
 
-        # Some versions have e_score_correction_bias
+        # Some versions have e_score_correction_bias (not used in our model)
         bias = self._get_tensor_if_exists(f"{prefix}.e_score_correction_bias")
         if bias is not None:
             weights["e_score_correction_bias"] = bias
@@ -167,8 +172,9 @@ class GLM4WeightLoader:
         """
         Load shared expert weights for a MoE layer.
 
-        The shared expert processes all tokens.
+        HF uses "shared_experts" (plural), model uses "shared_expert" (singular).
         """
+        # HF uses "shared_experts" (plural)
         prefix = f"model.layers.{layer_idx}.mlp.shared_experts"
         weights = {}
 
@@ -178,13 +184,14 @@ class GLM4WeightLoader:
             if tensor is not None:
                 weights[name] = tensor
 
-        # GLM4 might use fused gate_up_proj for shared expert
-        fused = self._get_tensor_if_exists(f"{prefix}.gate_up_proj.weight")
-        if fused is not None:
-            # Split fused gate_up into separate tensors
-            intermediate = fused.shape[0] // 2
-            weights["gate_proj"] = fused[:intermediate]
-            weights["up_proj"] = fused[intermediate:]
+        # Some versions might use fused gate_up_proj
+        if "gate_proj" not in weights:
+            fused = self._get_tensor_if_exists(f"{prefix}.gate_up_proj.weight")
+            if fused is not None:
+                # Split fused gate_up into separate tensors
+                intermediate = fused.shape[0] // 2
+                weights["gate_proj"] = fused[:intermediate]
+                weights["up_proj"] = fused[intermediate:]
 
         return weights
 
@@ -244,7 +251,7 @@ class GLM4WeightLoader:
         Load all non-expert weights (to GPU).
 
         Returns dict with attention, norm, embedding, router, shared expert weights.
-        These stay resident on GPU.
+        Keys match model.named_parameters() names.
         """
         weights = {}
 
@@ -257,7 +264,7 @@ class GLM4WeightLoader:
         # Per-layer weights
         print("Loading layers...")
         for layer_idx in range(self.config.num_layers):
-            # Attention
+            # Attention weights and biases
             attn = self.load_layer_attention(layer_idx)
             for name, weight in attn.items():
                 weights[f"layers.{layer_idx}.self_attn.{name}"] = weight
@@ -271,20 +278,21 @@ class GLM4WeightLoader:
             is_moe = layer_idx >= self.config.first_k_dense_replace
 
             if is_moe:
-                # Router
+                # Router - HF uses "gate", model uses "router"
                 router = self.load_router(layer_idx)
-                for name, weight in router.items():
-                    weights[f"layers.{layer_idx}.mlp.router.{name}"] = weight
+                weights[f"layers.{layer_idx}.mlp.router.weight"] = router["weight"]
 
-                # Shared expert
+                # Shared expert - HF uses "shared_experts", model uses "shared_expert"
                 shared = self.load_shared_expert(layer_idx)
-                for name, weight in shared.items():
-                    weights[f"layers.{layer_idx}.mlp.shared_expert.{name}"] = weight
+                for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                    if proj_name in shared:
+                        weights[f"layers.{layer_idx}.mlp.shared_expert.{proj_name}.weight"] = shared[proj_name]
             else:
                 # Dense MLP
                 mlp = self.load_dense_mlp(layer_idx)
-                for name, weight in mlp.items():
-                    weights[f"layers.{layer_idx}.mlp.{name}"] = weight
+                for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                    if proj_name in mlp:
+                        weights[f"layers.{layer_idx}.mlp.{proj_name}.weight"] = mlp[proj_name]
 
             if (layer_idx + 1) % 8 == 0:
                 print(f"  Loaded {layer_idx + 1}/{self.config.num_layers} layers")

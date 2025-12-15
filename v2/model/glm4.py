@@ -192,7 +192,7 @@ class GLM4Attention(nn.Module):
         attn_output = torch.matmul(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_len, self.hidden_dim)
+        attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.head_dim)
         return self.o_proj(attn_output)
 
     def _repeat_kv(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -213,15 +213,14 @@ class GLM4DenseMLP(nn.Module):
         self.hidden_dim = config.hidden_dim
         self.intermediate_dim = intermediate_size or config.intermediate_dim
 
-        # GLM4 uses fused gate_up projection
-        self.gate_up_proj = nn.Linear(self.hidden_dim, self.intermediate_dim * 2, bias=False)
+        # Separate gate/up projections to match HuggingFace format
+        self.gate_proj = nn.Linear(self.hidden_dim, self.intermediate_dim, bias=False)
+        self.up_proj = nn.Linear(self.hidden_dim, self.intermediate_dim, bias=False)
         self.down_proj = nn.Linear(self.intermediate_dim, self.hidden_dim, bias=False)
         self.act_fn = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up = self.gate_up_proj(x)
-        gate, up = gate_up.chunk(2, dim=-1)
-        return self.down_proj(self.act_fn(gate) * up)
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class GLM4SigmoidRouter(nn.Module):
@@ -563,7 +562,7 @@ class OffloadedGLM4(nn.Module):
         if position_ids is None:
             if kv_cache is not None:
                 # Get position from KV cache
-                start_pos = kv_cache.get_seq_len(0)
+                start_pos = kv_cache.cur_len
             else:
                 start_pos = 0
             position_ids = torch.arange(
