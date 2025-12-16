@@ -134,11 +134,11 @@ class GLM4Attention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.rotary_dim = int(self.head_dim * config.partial_rotary_factor)
 
-        # Projections with bias
+        # Projections - Q/K/V have bias, O does not (matches HuggingFace GLM4)
         self.q_proj = nn.Linear(self.hidden_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(self.hidden_dim, self.num_kv_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.hidden_dim, self.num_kv_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_dim, bias=config.attention_bias)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_dim, bias=False)
 
         # Partial RoPE
         self.rotary_emb = PartialRotaryEmbedding(
