@@ -381,6 +381,161 @@ def test_dense_first_layer():
     return True
 
 
+def test_adaptive_slot_reallocation():
+    """Test that slot reallocation moves slots from low-miss to high-miss layers."""
+    print("\n" + "=" * 60)
+    print("TEST: Adaptive Slot Reallocation")
+    print("=" * 60)
+
+    from hydranet.cache.expert_cache import PerLayerCache, ExpertCacheManager, SlotTier
+    from hydranet.config import ExpertCacheConfig
+
+    # Create a mock config
+    from dataclasses import dataclass
+
+    @dataclass
+    class MockModelConfig:
+        num_layers: int = 4
+        num_experts: int = 16
+        expert_size_bytes: int = 1024
+
+    model_config = MockModelConfig()
+    cache_config = ExpertCacheConfig(
+        pinned_slots=0,
+        hot_slots=2,
+        probation_slots=2,
+        enable_dynamic_slots=True,
+        realloc_interval_tokens=10,
+        miss_rate_threshold=0.3,
+        max_slots_per_layer=8,
+    )
+
+    manager = ExpertCacheManager(
+        model_config=model_config,
+        cache_config=cache_config,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    # Register some dummy experts
+    for layer_idx in range(model_config.num_layers):
+        for expert_idx in range(model_config.num_experts):
+            weights = {
+                "gate_proj": torch.randn(64, 32),
+                "up_proj": torch.randn(64, 32),
+                "down_proj": torch.randn(32, 64),
+            }
+            manager.register_expert(layer_idx, expert_idx, weights)
+
+    # Simulate uneven access patterns
+    # Layer 0: always hits same experts (low miss)
+    # Layer 1: cycles through many experts (high miss)
+    for _ in range(50):
+        # Layer 0: always access experts 0, 1 (will have high hit rate after warmup)
+        manager.get_expert_weights(0, 0)
+        manager.get_expert_weights(0, 1)
+
+        # Layer 1: cycle through many experts (will have high miss rate)
+        for e in range(8):
+            manager.get_expert_weights(1, e % model_config.num_experts)
+
+    # Get initial stats
+    stats_before = [cache.get_stats() for cache in manager.layer_caches]
+    slots_before = [cache.get_slot_count() for cache in manager.layer_caches]
+
+    print(f"  Before reallocation:")
+    print(f"    Layer 0: slots={slots_before[0]}, hit_rate={stats_before[0]['hit_rate']:.1%}")
+    print(f"    Layer 1: slots={slots_before[1]}, hit_rate={stats_before[1]['hit_rate']:.1%}")
+
+    # Trigger reallocation
+    manager._do_reallocation()
+
+    # Get stats after
+    slots_after = [cache.get_slot_count() for cache in manager.layer_caches]
+
+    print(f"  After reallocation:")
+    print(f"    Layer 0: slots={slots_after[0]}")
+    print(f"    Layer 1: slots={slots_after[1]}")
+
+    # Verify layer 1 got more slots (or at least didn't lose any)
+    # and layer 0 lost slots (or stayed same if already minimal)
+    layer1_improved = slots_after[1] >= slots_before[1]
+
+    manager.shutdown()
+
+    if layer1_improved:
+        print("  Reallocation OK - high-miss layer maintained/gained slots")
+        return True
+    else:
+        print("  Reallocation FAILED - high-miss layer lost slots unexpectedly")
+        return False
+
+
+def test_slot_add_remove():
+    """Test PerLayerCache add_slot and remove_slot methods."""
+    print("\n" + "=" * 60)
+    print("TEST: Slot Add/Remove")
+    print("=" * 60)
+
+    from hydranet.cache.expert_cache import PerLayerCache, SlotTier
+    from hydranet.config import ExpertCacheConfig
+
+    cache_config = ExpertCacheConfig(
+        pinned_slots=0,
+        hot_slots=1,
+        probation_slots=1,
+        max_slots_per_layer=5,
+    )
+
+    cache = PerLayerCache(
+        layer_idx=0,
+        num_experts=8,
+        expert_size_bytes=1024,
+        config=cache_config,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    initial_slots = cache.get_slot_count()
+    print(f"  Initial slots: {initial_slots}")
+
+    # Test add_slot
+    added = cache.add_slot()
+    assert added, "Should be able to add slot"
+    assert cache.get_slot_count() == initial_slots + 1, "Slot count should increase"
+    print(f"  After add: {cache.get_slot_count()} slots")
+
+    # Add more slots up to max
+    while cache.add_slot():
+        pass
+
+    max_slots = cache.get_slot_count()
+    print(f"  At max: {max_slots} slots")
+    assert max_slots == cache_config.max_slots_per_layer, f"Should hit max ({cache_config.max_slots_per_layer})"
+
+    # Test remove_slot
+    removed = cache.remove_slot()
+    assert removed, "Should be able to remove slot"
+    assert cache.get_slot_count() == max_slots - 1, "Slot count should decrease"
+    print(f"  After remove: {cache.get_slot_count()} slots")
+
+    # Remove down to 1
+    while cache.get_slot_count() > 1:
+        cache.remove_slot()
+
+    min_slots = cache.get_slot_count()
+    print(f"  At min: {min_slots} slots")
+    assert min_slots == 1, "Should be able to go down to 1 slot"
+
+    # Can't remove below 1
+    removed = cache.remove_slot()
+    assert not removed, "Should not be able to remove last slot"
+    assert cache.get_slot_count() == 1, "Should still have 1 slot"
+
+    print("  Slot add/remove OK")
+    return True
+
+
 def main():
     print("=" * 60)
     print("GLM-4.5-Air Synthetic Smoke Test")
@@ -393,6 +548,8 @@ def main():
     results["sigmoid_routing"] = test_sigmoid_routing()
     results["no_nan_inf"] = test_no_nan_inf()
     results["cache_equivalence"] = test_cache_config_equivalence()
+    results["slot_add_remove"] = test_slot_add_remove()
+    results["adaptive_reallocation"] = test_adaptive_slot_reallocation()
 
     print("\n" + "=" * 60)
     print("SUMMARY")

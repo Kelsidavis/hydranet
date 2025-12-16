@@ -174,7 +174,7 @@ Shows per-layer miss counts to identify bottleneck layers.
 - [x] 2-phase hits-first overlap
 - [x] Mixtral-8x7B support
 - [x] GLM-4.5-Air support
-- [ ] Adaptive slot reallocation
+- [x] Adaptive slot reallocation
 - [ ] Speculative decoding integration
 - [ ] Multi-GPU expert sharding
 

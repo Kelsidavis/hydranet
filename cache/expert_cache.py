@@ -395,6 +395,119 @@ class PerLayerCache:
         slot.last_access = 0.0
         self.evictions += 1
 
+    def add_slot(self, tier: SlotTier = SlotTier.PROBATION) -> bool:
+        """
+        Add a new slot to this layer's cache.
+
+        Returns True if slot was added, False if at max capacity.
+        """
+        with self._lock:
+            if self.total_slots >= self.config.max_slots_per_layer:
+                return False
+
+            new_idx = self.total_slots
+            new_slot = SlotInfo(slot_idx=new_idx, tier=tier)
+            self.slots.append(new_slot)
+            self.total_slots += 1
+
+            # Update tier counts
+            if tier == SlotTier.PINNED:
+                self.pinned_slots += 1
+            elif tier == SlotTier.HOT:
+                self.hot_slots += 1
+            else:
+                self.probation_slots += 1
+
+            return True
+
+    def remove_slot(self) -> bool:
+        """
+        Remove a slot from this layer's cache.
+
+        Removes the least valuable slot (empty > probation LFU > hot LFU).
+        Returns True if slot was removed, False if at minimum (1 slot).
+        """
+        with self._lock:
+            if self.total_slots <= 1:
+                return False
+
+            # Find slot to remove (prefer empty, then LFU)
+            target_slot = None
+
+            # 1. Empty probation slot
+            for slot in reversed(self.slots[self.pinned_slots + self.hot_slots:]):
+                if slot.expert_id is None:
+                    target_slot = slot
+                    break
+
+            # 2. Empty hot slot
+            if target_slot is None:
+                for slot in reversed(self.slots[self.pinned_slots:self.pinned_slots + self.hot_slots]):
+                    if slot.expert_id is None:
+                        target_slot = slot
+                        break
+
+            # 3. LFU probation slot
+            if target_slot is None and self.probation_slots > 0:
+                probation_slots = [s for s in self.slots[self.pinned_slots + self.hot_slots:]
+                                   if s.expert_id is not None]
+                if probation_slots:
+                    target_slot = min(probation_slots, key=lambda s: (s.hit_count, s.last_access))
+
+            # 4. LFU hot slot (last resort)
+            if target_slot is None and self.hot_slots > 0:
+                hot_slots = [s for s in self.slots[self.pinned_slots:self.pinned_slots + self.hot_slots]
+                             if s.expert_id is not None]
+                if hot_slots:
+                    target_slot = min(hot_slots, key=lambda s: (s.hit_count, s.last_access))
+
+            if target_slot is None:
+                return False
+
+            # Evict if occupied
+            if target_slot.expert_id is not None:
+                self._evict(target_slot)
+
+            # Remove slot
+            tier = target_slot.tier
+            slot_idx = target_slot.slot_idx
+            self.slots.remove(target_slot)
+            self.total_slots -= 1
+
+            # Update tier counts
+            if tier == SlotTier.PINNED:
+                self.pinned_slots -= 1
+            elif tier == SlotTier.HOT:
+                self.hot_slots -= 1
+            else:
+                self.probation_slots -= 1
+
+            # Reindex remaining slots
+            for i, slot in enumerate(self.slots):
+                if slot.slot_idx != i:
+                    old_idx = slot.slot_idx
+                    slot.slot_idx = i
+                    # Update GPU weight references
+                    if old_idx in self.gpu_weights:
+                        self.gpu_weights[i] = self.gpu_weights.pop(old_idx)
+                    if old_idx in self.gpu_int4_slots:
+                        self.gpu_int4_slots[i] = self.gpu_int4_slots.pop(old_idx)
+                        self.gpu_int4_slots[i].slot_idx = i
+
+            # Clean up orphaned slot data
+            for idx in list(self.gpu_weights.keys()):
+                if idx >= self.total_slots:
+                    del self.gpu_weights[idx]
+            for idx in list(self.gpu_int4_slots.keys()):
+                if idx >= self.total_slots:
+                    del self.gpu_int4_slots[idx]
+
+            return True
+
+    def get_slot_count(self) -> int:
+        """Get current number of slots."""
+        return self.total_slots
+
     def _load_to_slot(self, expert_idx: int, slot: SlotInfo):
         """Load expert from pinned RAM (or packed store) to GPU slot."""
         if self.use_packed_mode:
@@ -936,30 +1049,77 @@ class ExpertCacheManager:
         """
         Reallocate slots from low-miss to high-miss layers.
 
-        Simple algorithm:
-        1. Find layers with miss rate > threshold
-        2. Find layers with miss rate < threshold/2
-        3. Move one slot from low to high
+        Algorithm:
+        1. Collect stats from all layers
+        2. Find high-miss layers (miss rate > threshold) as recipients
+        3. Find low-miss layers (miss rate < threshold/2) with >1 slot as donors
+        4. Actually transfer slots from donors to recipients
+        5. Log reallocation for debugging
         """
+        import os
+        debug = os.environ.get("DEBUG_REALLOC", "0") == "1"
+
         stats = [cache.get_stats() for cache in self.layer_caches]
 
         # Find donor (low miss rate) and recipient (high miss rate) layers
+        # Sort recipients by miss rate (highest first) and donors by miss rate (lowest first)
         donors = []
         recipients = []
 
-        for s in stats:
-            if s["hit_rate"] < 1 - self.cache_config.miss_rate_threshold:
-                recipients.append(s["layer"])
-            elif s["hit_rate"] > 1 - self.cache_config.miss_rate_threshold / 2:
-                if self._slot_allocations[s["layer"]] > 1:
-                    donors.append(s["layer"])
+        miss_threshold = self.cache_config.miss_rate_threshold
+        low_miss_threshold = miss_threshold / 2
 
-        # Move slots (simple 1:1 for now)
-        for donor, recipient in zip(donors, recipients):
-            if self._slot_allocations[recipient] < self.cache_config.max_slots_per_layer:
-                self._slot_allocations[donor] -= 1
-                self._slot_allocations[recipient] += 1
-                # Note: actual slot resize would require more complex logic
+        for s in stats:
+            layer_idx = s["layer"]
+            miss_rate = 1 - s["hit_rate"]
+            current_slots = self.layer_caches[layer_idx].get_slot_count()
+
+            if miss_rate > miss_threshold:
+                # High miss rate - wants more slots
+                if current_slots < self.cache_config.max_slots_per_layer:
+                    recipients.append((layer_idx, miss_rate))
+            elif miss_rate < low_miss_threshold:
+                # Low miss rate - can donate slots
+                if current_slots > 1:
+                    donors.append((layer_idx, miss_rate))
+
+        # Sort: recipients by miss rate (highest first), donors by miss rate (lowest first)
+        recipients.sort(key=lambda x: -x[1])
+        donors.sort(key=lambda x: x[1])
+
+        if debug and (donors or recipients):
+            print(f"[Realloc] Recipients (high miss): {[(l, f'{m:.1%}') for l, m in recipients[:5]]}")
+            print(f"[Realloc] Donors (low miss): {[(l, f'{m:.1%}') for l, m in donors[:5]]}")
+
+        # Transfer slots
+        transfers = 0
+        max_transfers_per_interval = 2  # Limit churn
+
+        for (recipient_idx, _), (donor_idx, _) in zip(recipients, donors):
+            if transfers >= max_transfers_per_interval:
+                break
+
+            donor_cache = self.layer_caches[donor_idx]
+            recipient_cache = self.layer_caches[recipient_idx]
+
+            # Check constraints
+            if donor_cache.get_slot_count() <= 1:
+                continue
+            if recipient_cache.get_slot_count() >= self.cache_config.max_slots_per_layer:
+                continue
+
+            # Do the transfer
+            if donor_cache.remove_slot() and recipient_cache.add_slot():
+                self._slot_allocations[donor_idx] -= 1
+                self._slot_allocations[recipient_idx] += 1
+                transfers += 1
+
+                if debug:
+                    print(f"[Realloc] Moved slot: L{donor_idx} ({donor_cache.get_slot_count()+1}->{donor_cache.get_slot_count()}) "
+                          f"-> L{recipient_idx} ({recipient_cache.get_slot_count()-1}->{recipient_cache.get_slot_count()})")
+
+        if debug and transfers > 0:
+            print(f"[Realloc] Total transfers: {transfers}")
 
     def _prefetch_worker(self):
         """Background thread for async prefetching."""
