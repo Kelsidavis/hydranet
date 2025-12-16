@@ -34,24 +34,23 @@ MoE inference runtime for running large Mixture-of-Experts models on consumer GP
 
 ```
 hydranet/
-├── v2/
-│   ├── model/
-│   │   ├── mixtral.py      # Mixtral-8x7B model
-│   │   ├── glm4.py         # GLM-4.5-Air model
-│   │   ├── loader.py       # Mixtral weight loader
-│   │   └── glm4_loader.py  # GLM4 weight loader
-│   ├── cache/
-│   │   ├── expert_cache.py      # Per-layer LRU cache manager
-│   │   ├── packed_expert_store.py # INT4 blob storage + staging
-│   │   └── kv_cache.py          # KV cache for attention
-│   ├── kernels/
-│   │   └── int4_gemm.py    # Fused INT4 MLP kernels
-│   ├── preprocess/
-│   │   ├── pack_weights.py # Mixtral INT4 packer
-│   │   └── pack_glm4.py    # GLM4 INT4 packer
-│   └── config.py           # Model configs
-├── test_generate.py        # Mixtral generation test
-└── test_glm4_smoke.py      # GLM4 smoke test
+├── model/
+│   ├── mixtral.py      # Mixtral-8x7B model
+│   ├── glm4.py         # GLM-4.5-Air model
+│   ├── loader.py       # Mixtral weight loader
+│   └── glm4_loader.py  # GLM4 weight loader
+├── cache/
+│   ├── expert_cache.py      # Per-layer LRU cache manager
+│   ├── packed_expert_store.py # INT4 blob storage + staging
+│   └── kv_cache.py          # KV cache for attention
+├── kernels/
+│   └── int4_gemm.py    # Fused INT4 MLP kernels
+├── preprocess/
+│   ├── pack_weights.py # Mixtral INT4 packer
+│   └── pack_glm4.py    # GLM4 INT4 packer
+├── config.py           # Model configs
+├── test_generate.py    # Mixtral generation test
+└── test_glm4_smoke.py  # GLM4 smoke test
 ```
 
 ## Requirements
@@ -74,7 +73,7 @@ pip install torch safetensors transformers
 huggingface-cli download mistralai/Mixtral-8x7B-Instruct-v0.1 --local-dir /path/to/mixtral
 
 # 2. Pack experts to INT4 (one-time, ~20min)
-python -m hydranet.v2.preprocess.pack_weights \
+python -m hydranet.preprocess.pack_weights \
     --model-path /path/to/mixtral \
     --output-dir /path/to/mixtral/packed_int4
 
@@ -89,7 +88,7 @@ python test_generate.py --mode packed --tokens 100 --slots 3
 huggingface-cli download zai-org/GLM-4.5-Air --local-dir /path/to/glm4
 
 # 2. Pack experts to INT4
-python -m hydranet.v2.preprocess.pack_glm4 \
+python -m hydranet.preprocess.pack_glm4 \
     --model-path /path/to/glm4 \
     --output-dir /path/to/glm4/packed_int4
 

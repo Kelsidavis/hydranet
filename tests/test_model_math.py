@@ -18,14 +18,14 @@ import sys
 from pathlib import Path
 
 # Add parent to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def test_rope():
     """Test Rotary Position Embedding."""
     print("Testing RoPE...")
 
-    from hydranet.v2.model.mixtral import RotaryEmbedding, apply_rotary_pos_emb
+    from hydranet.model.mixtral import RotaryEmbedding, apply_rotary_pos_emb
 
     head_dim = 128
     max_pos = 1024
@@ -59,7 +59,7 @@ def test_rms_norm():
     """Test RMS LayerNorm."""
     print("Testing RMSNorm...")
 
-    from hydranet.v2.model.mixtral import RMSNorm
+    from hydranet.model.mixtral import RMSNorm
 
     hidden_dim = 256
     norm = RMSNorm(hidden_dim)
@@ -82,8 +82,8 @@ def test_gqa_attention():
     """Test Grouped Query Attention."""
     print("Testing GQA Attention...")
 
-    from hydranet.v2.model.mixtral import MixtralAttention
-    from hydranet.v2.config import MixtralConfig
+    from hydranet.model.mixtral import MixtralAttention
+    from hydranet.config import MixtralConfig
 
     # Small config for testing
     config = MixtralConfig()
@@ -127,8 +127,8 @@ def test_router():
     """Test Top-K Router."""
     print("Testing Router...")
 
-    from hydranet.v2.model.router import TopKRouter
-    from hydranet.v2.config import MixtralConfig, ExpertCacheConfig
+    from hydranet.model.router import TopKRouter
+    from hydranet.config import MixtralConfig, ExpertCacheConfig
 
     config = MixtralConfig()
     config.hidden_dim = 256
@@ -200,8 +200,8 @@ def test_expert_cache():
     """Test Expert Cache Manager."""
     print("Testing Expert Cache...")
 
-    from hydranet.v2.cache.expert_cache import PerLayerCache, ExpertCacheManager
-    from hydranet.v2.config import MixtralConfig, ExpertCacheConfig
+    from hydranet.cache.expert_cache import PerLayerCache, ExpertCacheManager
+    from hydranet.config import MixtralConfig, ExpertCacheConfig
 
     config = MixtralConfig()
     config.hidden_dim = 256
@@ -257,8 +257,8 @@ def test_full_forward_mock():
     """Test full model forward with mock weights."""
     print("Testing Full Forward (mock weights)...")
 
-    from hydranet.v2.model.mixtral import OffloadedMixtral
-    from hydranet.v2.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
+    from hydranet.model.mixtral import OffloadedMixtral
+    from hydranet.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
 
     # Tiny config for fast testing
     config = MixtralConfig()
@@ -353,8 +353,8 @@ def test_generate_mock():
     """Test generation with mock weights."""
     print("Testing Generation (mock weights)...")
 
-    from hydranet.v2.model.mixtral import OffloadedMixtral
-    from hydranet.v2.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
+    from hydranet.model.mixtral import OffloadedMixtral
+    from hydranet.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
 
     # Tiny config
     config = MixtralConfig()

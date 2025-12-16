@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def create_mini_model(
@@ -32,8 +32,8 @@ def create_mini_model(
         - "balanced": 4 pinned + 2 hot + 2 probation
         - "minimal": 1 pinned + 1 probation (force evictions)
     """
-    from hydranet.v2.model.mixtral import OffloadedMixtral
-    from hydranet.v2.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
+    from hydranet.model.mixtral import OffloadedMixtral
+    from hydranet.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
 
     # Small config for fast testing
     config = MixtralConfig()
@@ -243,7 +243,7 @@ def test_kv_cache_consistency():
     print("TEST: KV Cache Consistency")
     print("=" * 60)
 
-    from hydranet.v2.config import TopKMode
+    from hydranet.config import TopKMode
 
     model, config = create_mini_model(cache_config_type="all_fit")
     init_weights_deterministic(model, config)

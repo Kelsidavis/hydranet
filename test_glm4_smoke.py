@@ -4,13 +4,13 @@
 import sys
 from pathlib import Path
 
-# Add current directory so 'v2' module is found
-sys.path.insert(0, str(Path(__file__).parent))
+# Add parent directory so 'hydranet' package is found
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def test_config():
     """Test GLM4 config values."""
-    from v2.config import GLM4AirConfig
+    from hydranet.config import GLM4AirConfig
 
     config = GLM4AirConfig()
 
@@ -48,7 +48,7 @@ def test_imports():
     """Test that all GLM4 modules import correctly."""
     print("\nTesting imports...")
 
-    from v2.model.glm4 import (
+    from hydranet.model.glm4 import (
         OffloadedGLM4,
         GLM4Attention,
         GLM4SigmoidRouter,
@@ -58,18 +58,18 @@ def test_imports():
     )
     print("  ✓ glm4.py imports OK")
 
-    from v2.model.glm4_loader import GLM4WeightLoader
+    from hydranet.model.glm4_loader import GLM4WeightLoader
     print("  ✓ glm4_loader.py imports OK")
 
-    from v2 import GLM4AirConfig
+    from hydranet import GLM4AirConfig
     print("  ✓ Top-level exports OK")
 
 
 def test_model_init():
     """Test model initialization (without weights)."""
     import torch
-    from v2.config import GLM4AirConfig, ExpertCacheConfig
-    from v2.model.glm4 import OffloadedGLM4
+    from hydranet.config import GLM4AirConfig, ExpertCacheConfig
+    from hydranet.model.glm4 import OffloadedGLM4
 
     print("\nTesting model initialization...")
 
@@ -107,8 +107,8 @@ def test_model_init():
 def test_router():
     """Test sigmoid router."""
     import torch
-    from v2.config import GLM4AirConfig
-    from v2.model.glm4 import GLM4SigmoidRouter
+    from hydranet.config import GLM4AirConfig
+    from hydranet.model.glm4 import GLM4SigmoidRouter
 
     print("\nTesting sigmoid router...")
 
@@ -141,8 +141,8 @@ def test_router():
 def test_partial_rope():
     """Test partial rotary embeddings."""
     import torch
-    from v2.config import GLM4AirConfig
-    from v2.model.glm4 import PartialRotaryEmbedding, apply_partial_rotary_pos_emb
+    from hydranet.config import GLM4AirConfig
+    from hydranet.model.glm4 import PartialRotaryEmbedding, apply_partial_rotary_pos_emb
 
     print("\nTesting partial RoPE...")
 

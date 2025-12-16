@@ -22,12 +22,12 @@ from typing import Dict
 import sys
 
 # Add parent to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from hydranet.v2.config import GLM4AirConfig
-from hydranet.v2.model.glm4_loader import GLM4WeightLoader
-from hydranet.v2.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
-from hydranet.v2.cache.packed_expert_store import BlobLayout
+from hydranet.config import GLM4AirConfig
+from hydranet.model.glm4_loader import GLM4WeightLoader
+from hydranet.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
+from hydranet.cache.packed_expert_store import BlobLayout
 
 
 def pack_glm4_experts(

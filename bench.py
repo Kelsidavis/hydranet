@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 @dataclass
@@ -127,7 +127,7 @@ class HydraNetBenchmark:
 
     def setup(self):
         """Load model and tokenizer."""
-        from hydranet.v2.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
+        from hydranet.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
 
         if self.use_mock:
             self._setup_mock()
@@ -136,8 +136,8 @@ class HydraNetBenchmark:
 
     def _setup_mock(self):
         """Setup with mock weights for testing."""
-        from hydranet.v2.model.mixtral import OffloadedMixtral
-        from hydranet.v2.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
+        from hydranet.model.mixtral import OffloadedMixtral
+        from hydranet.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
 
         print("Setting up mock model...")
 
@@ -219,9 +219,9 @@ class HydraNetBenchmark:
 
     def _setup_real(self):
         """Setup with real Mixtral weights."""
-        from hydranet.v2.model.mixtral import OffloadedMixtral
-        from hydranet.v2.model.loader import MixtralWeightLoader
-        from hydranet.v2.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
+        from hydranet.model.mixtral import OffloadedMixtral
+        from hydranet.model.loader import MixtralWeightLoader
+        from hydranet.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
         from transformers import AutoTokenizer
 
         print(f"Loading model from {self.model_path}...")
@@ -290,8 +290,8 @@ class HydraNetBenchmark:
     def _load_int4_experts_dequant(self):
         """Load INT4 experts with startup dequantization to fp16 (compat/debug mode)."""
         import numpy as np
-        from hydranet.v2.cache.packed_expert_store import PackedExpertStore
-        from hydranet.v2.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
+        from hydranet.cache.packed_expert_store import PackedExpertStore
+        from hydranet.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
 
         packed_dir = Path(self.packed_dir or self.model_path).expanduser()
         idx_path = packed_dir / "experts.idx"
@@ -382,7 +382,7 @@ class HydraNetBenchmark:
 
     def _load_int4_experts_packed(self):
         """Load INT4 experts in packed mode - keeps INT4 in RAM, dequants on GPU (preferred)."""
-        from hydranet.v2.cache.packed_expert_store import PackedExpertStore
+        from hydranet.cache.packed_expert_store import PackedExpertStore
 
         packed_dir = Path(self.packed_dir or self.model_path).expanduser()
         idx_path = packed_dir / "experts.idx"

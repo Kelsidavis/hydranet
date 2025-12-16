@@ -4,7 +4,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def main():
@@ -16,11 +16,11 @@ def main():
     import time
     import argparse
 
-    from v2.config import GLM4AirConfig, ExpertCacheConfig
-    from v2.model.glm4 import OffloadedGLM4
-    from v2.model.glm4_loader import GLM4WeightLoader
-    from v2.cache.packed_expert_store import PackedExpertStore
-    from v2.cache.kv_cache import SimpleKVCache
+    from hydranet.config import GLM4AirConfig, ExpertCacheConfig
+    from hydranet.model.glm4 import OffloadedGLM4
+    from hydranet.model.glm4_loader import GLM4WeightLoader
+    from hydranet.cache.packed_expert_store import PackedExpertStore
+    from hydranet.cache.kv_cache import SimpleKVCache
 
     parser = argparse.ArgumentParser(description="GLM-4.5-Air generation test")
     parser.add_argument("--model-path", type=str, required=True,

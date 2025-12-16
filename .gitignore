@@ -60,3 +60,7 @@ Thumbs.db
 .env.local
 secrets.json
 credentials.json
+
+# Claude Code
+CLAUDE.md
+.claude/

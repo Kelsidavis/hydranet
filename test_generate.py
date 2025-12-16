@@ -12,11 +12,11 @@ def main():
     warnings.filterwarnings("ignore", message="The given buffer is not writable")
 
     import torch
-    from hydranet.v2.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
-    from hydranet.v2.model.mixtral import OffloadedMixtral
-    from hydranet.v2.model.loader import MixtralWeightLoader
-    from hydranet.v2.cache.packed_expert_store import PackedExpertStore
-    from hydranet.v2.cache.kv_cache import SimpleKVCache
+    from hydranet.config import MixtralConfig, ExpertCacheConfig, KVCacheConfig
+    from hydranet.model.mixtral import OffloadedMixtral
+    from hydranet.model.loader import MixtralWeightLoader
+    from hydranet.cache.packed_expert_store import PackedExpertStore
+    from hydranet.cache.kv_cache import SimpleKVCache
     from transformers import AutoTokenizer
     import time
 

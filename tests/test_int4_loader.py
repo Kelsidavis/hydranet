@@ -19,10 +19,10 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from hydranet.v2.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
-from hydranet.v2.cache.packed_expert_store import PackedExpertStore, BlobLayout
-from hydranet.v2.cache.expert_cache import ExpertCacheManager, PerLayerCache
-from hydranet.v2.config import MixtralConfig, ExpertCacheConfig
+from hydranet.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
+from hydranet.cache.packed_expert_store import PackedExpertStore, BlobLayout
+from hydranet.cache.expert_cache import ExpertCacheManager, PerLayerCache
+from hydranet.config import MixtralConfig, ExpertCacheConfig
 
 
 def create_synthetic_packed_store(

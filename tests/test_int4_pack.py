@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def test_int4_quantization():
@@ -24,7 +24,7 @@ def test_int4_quantization():
     print("TEST: INT4 Quantization")
     print("=" * 60)
 
-    from hydranet.v2.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
+    from hydranet.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
 
     config = QuantConfig(bits=4, group_size=128, symmetric=True)
     packer = ExpertWeightPacker(config)
@@ -75,7 +75,7 @@ def test_expert_pack_roundtrip():
     print("TEST: Expert Pack Roundtrip")
     print("=" * 60)
 
-    from hydranet.v2.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
+    from hydranet.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
 
     config = QuantConfig()
     packer = ExpertWeightPacker(config)
@@ -123,7 +123,7 @@ def test_gpu_expert_slot():
     print("TEST: GPU Expert Slot")
     print("=" * 60)
 
-    from hydranet.v2.cache.packed_expert_store import GpuExpertSlot, BlobLayout
+    from hydranet.cache.packed_expert_store import GpuExpertSlot, BlobLayout
 
     # Skip if no CUDA
     device = torch.device("cpu")  # Use CPU for testing
@@ -182,7 +182,7 @@ def test_blob_layout():
     print("TEST: Blob Layout")
     print("=" * 60)
 
-    from hydranet.v2.cache.packed_expert_store import BlobLayout
+    from hydranet.cache.packed_expert_store import BlobLayout
 
     hidden_dim = 4096
     intermediate_dim = 14336
@@ -236,7 +236,7 @@ def test_pinned_staging_ring():
     print("TEST: Pinned Staging Ring")
     print("=" * 60)
 
-    from hydranet.v2.cache.packed_expert_store import PinnedStagingRing
+    from hydranet.cache.packed_expert_store import PinnedStagingRing
 
     device = torch.device("cpu")  # Use CPU for testing
     num_slots = 3
@@ -267,8 +267,8 @@ def test_packed_store_format():
     print("TEST: Packed Expert Store Format")
     print("=" * 60)
 
-    from hydranet.v2.cache.packed_expert_store import PackedExpertStore, BlobLayout
-    from hydranet.v2.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
+    from hydranet.cache.packed_expert_store import PackedExpertStore, BlobLayout
+    from hydranet.preprocess.pack_weights import ExpertWeightPacker, QuantConfig
     import json
 
     # Create temp directory
