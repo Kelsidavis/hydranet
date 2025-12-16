@@ -21,6 +21,7 @@ def main():
     from hydranet.model.glm4_loader import GLM4WeightLoader
     from hydranet.cache.packed_expert_store import PackedExpertStore
     from hydranet.cache.kv_cache import SimpleKVCache
+    from hydranet.kernels.int8_linear import convert_model_to_int8, estimate_int8_memory
 
     parser = argparse.ArgumentParser(description="GLM-4.5-Air generation test")
     parser.add_argument("--model-path", type=str, required=True,
@@ -43,6 +44,8 @@ def main():
                         help="Debug weight loading")
     parser.add_argument("--max-layers", type=int, default=None,
                         help="Limit number of layers (for memory-constrained testing)")
+    parser.add_argument("--int8", action="store_true",
+                        help="Use INT8 for non-expert weights (saves ~50% VRAM)")
     args = parser.parse_args()
 
     # Clean up GPU memory
@@ -139,9 +142,34 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
+    # Convert to INT8 if requested (before moving to GPU)
+    if args.int8:
+        print("\n  Converting to INT8...")
+        mem_estimate = estimate_int8_memory(model)
+        print(f"    fp16: {mem_estimate['fp16_mb']:.0f} MB -> int8: {mem_estimate['int8_mb']:.0f} MB")
+        print(f"    Savings: {mem_estimate['savings_mb']:.0f} MB ({mem_estimate['savings_mb']/mem_estimate['fp16_mb']*100:.0f}%)")
+
+        # Skip lm_head to preserve output quality
+        convert_model_to_int8(model, skip_layers=["lm_head"])
+        gc.collect()
+        print("  INT8 conversion complete")
+
     # Move model to GPU and convert to correct dtype
     print("  Moving model to GPU...")
-    model.to(device=device, dtype=dtype)
+    if args.int8:
+        # INT8 layers handle their own dtypes, just move to device
+        model.to(device=device)
+        # Ensure all non-INT8 parameters are fp16 (LayerNorms, lm_head, etc.)
+        for name, param in model.named_parameters():
+            if param.dtype == torch.float32:
+                param.data = param.data.to(dtype)
+        for name, buf in model.named_buffers():
+            # Skip INT8 weights (they're int8), only convert float32 buffers
+            if buf.dtype == torch.float32:
+                # Can't modify buffer in-place for some, so skip
+                pass
+    else:
+        model.to(device=device, dtype=dtype)
     torch.cuda.empty_cache()
     print(f"  After weight load: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 
@@ -222,6 +250,12 @@ def main():
                     curr_input = next_token  # Decode
 
                 logits, _ = model.forward(curr_input, kv_cache=kv_cache)
+
+                # Update KV cache position tracking
+                if i == 0:
+                    kv_cache.set_len(curr_input.shape[1])  # After prefill
+                else:
+                    kv_cache.advance(1)  # After each decode step
             else:
                 logits, _ = model.forward(generated)
 
