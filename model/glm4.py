@@ -182,14 +182,26 @@ class GLM4Attention(nn.Module):
         key_states = self._repeat_kv(key_states)
         value_states = self._repeat_kv(value_states)
 
-        # Attention
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        # Use Flash Attention (SDPA) when available - faster and more memory efficient
+        use_sdpa = hasattr(F, 'scaled_dot_product_attention')
 
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+        if use_sdpa:
+            # SDPA handles causal masking internally
+            # is_causal=True for prefill (seq_len > 1), False for decode (seq_len = 1)
+            attn_output = F.scaled_dot_product_attention(
+                query_states, key_states, value_states,
+                attn_mask=None,
+                is_causal=(seq_len > 1),
+            )
+        else:
+            # Fallback to manual attention
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
+
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_output = torch.matmul(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.head_dim)
