@@ -22,6 +22,7 @@ def main():
     from hydranet.cache.packed_expert_store import PackedExpertStore
     from hydranet.cache.kv_cache import SimpleKVCache
     from hydranet.kernels.int8_linear import convert_model_to_int8, estimate_int8_memory
+    from hydranet.kernels.int4_linear import convert_model_to_int4, estimate_int4_memory
 
     parser = argparse.ArgumentParser(description="GLM-4.5-Air generation test")
     parser.add_argument("--model-path", type=str, required=True,
@@ -46,6 +47,10 @@ def main():
                         help="Limit number of layers (for memory-constrained testing)")
     parser.add_argument("--int8", action="store_true",
                         help="Use INT8 for non-expert weights (saves ~50% VRAM)")
+    parser.add_argument("--int4", action="store_true",
+                        help="Use INT4 for non-expert weights (saves ~75% VRAM, more quality loss)")
+    parser.add_argument("--hybrid", action="store_true",
+                        help="Use INT8 for attention, INT4 for MLP (balanced speed/memory)")
     parser.add_argument("--kv-size", type=int, default=2048,
                         help="KV cache max sequence length (default: 2048)")
     args = parser.parse_args()
@@ -144,8 +149,28 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    # Convert to INT8 if requested (before moving to GPU)
-    if args.int8:
+    # Convert to INT4/INT8 if requested (before moving to GPU)
+    use_quantized = args.int4 or args.int8 or args.hybrid
+    if args.hybrid:
+        print("\n  Converting to hybrid INT8/INT4...")
+        # INT8 for attention projections (hot path), INT4 for rest
+        # First convert everything to INT4
+        convert_model_to_int4(model, skip_layers=["lm_head", "embed_tokens", "q_proj", "k_proj", "v_proj", "o_proj"])
+        # Then convert attention projections to INT8 (overwrite INT4)
+        convert_model_to_int8(model, skip_layers=["lm_head", "shared_expert", "gate", "mlp"])
+        gc.collect()
+        print("  Hybrid conversion complete (INT8 attention, INT4 MLP)")
+    elif args.int4:
+        print("\n  Converting to INT4...")
+        mem_estimate = estimate_int4_memory(model)
+        print(f"    fp16: {mem_estimate['fp16_mb']:.0f} MB -> int4: {mem_estimate['int4_mb']:.0f} MB")
+        print(f"    Savings: {mem_estimate['savings_mb']:.0f} MB ({mem_estimate['savings_mb']/mem_estimate['fp16_mb']*100:.0f}%)")
+
+        # Skip lm_head and embeddings to preserve output quality
+        convert_model_to_int4(model, skip_layers=["lm_head", "embed_tokens"])
+        gc.collect()
+        print("  INT4 conversion complete")
+    elif args.int8:
         print("\n  Converting to INT8...")
         mem_estimate = estimate_int8_memory(model)
         print(f"    fp16: {mem_estimate['fp16_mb']:.0f} MB -> int8: {mem_estimate['int8_mb']:.0f} MB")
@@ -158,15 +183,15 @@ def main():
 
     # Move model to GPU and convert to correct dtype
     print("  Moving model to GPU...")
-    if args.int8:
-        # INT8 layers handle their own dtypes, just move to device
+    if use_quantized:
+        # Quantized layers handle their own dtypes, just move to device
         model.to(device=device)
-        # Ensure all non-INT8 parameters are fp16 (LayerNorms, lm_head, etc.)
+        # Ensure all non-quantized parameters are fp16 (LayerNorms, lm_head, etc.)
         for name, param in model.named_parameters():
             if param.dtype == torch.float32:
                 param.data = param.data.to(dtype)
         for name, buf in model.named_buffers():
-            # Skip INT8 weights (they're int8), only convert float32 buffers
+            # Skip quantized weights (they're int8/int4), only convert float32 buffers
             if buf.dtype == torch.float32:
                 # Can't modify buffer in-place for some, so skip
                 pass
@@ -309,6 +334,13 @@ def main():
     print(f"  Evictions: {stats['total_evictions']}")
     if stats['total_misses'] > 0:
         print(f"  Avg load time: {stats['avg_load_time_ms']:.1f}ms")
+        # Time breakdown estimate
+        total_load_ms = stats['total_misses'] * stats['avg_load_time_ms']
+        total_decode_ms = sum(token_times) if token_times else 0
+        if total_decode_ms > 0:
+            print(f"\n  TIME BREAKDOWN (decode only):")
+            print(f"    Expert loading: {total_load_ms:.0f}ms ({100*total_load_ms/total_decode_ms:.1f}%)")
+            print(f"    Compute: {total_decode_ms - total_load_ms:.0f}ms ({100*(1-total_load_ms/total_decode_ms):.1f}%)")
 
     print(f"\nFinal GPU memory: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 
