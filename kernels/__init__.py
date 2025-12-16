@@ -15,6 +15,7 @@ To be implemented:
 from .expert_mlp import ExpertMLPTriton, expert_mlp_int4
 from .int4_gemm import int4_linear, expert_mlp_int4_fused
 from .int8_linear import Int8Linear, Int8Embedding, convert_model_to_int8, estimate_int8_memory
+from .int8_gemm import int8_linear_fused, int8_linear
 
 __all__ = [
     "ExpertMLPTriton",
@@ -25,4 +26,6 @@ __all__ = [
     "Int8Embedding",
     "convert_model_to_int8",
     "estimate_int8_memory",
+    "int8_linear_fused",
+    "int8_linear",
 ]

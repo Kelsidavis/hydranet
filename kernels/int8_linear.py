@@ -109,6 +109,8 @@ class Int8Linear(nn.Module):
         """
         Forward pass with on-the-fly dequantization.
 
+        Uses fused Triton kernel when available (no fp16 weight materialization).
+
         Args:
             x: (*, in_features) input tensor
 
@@ -121,16 +123,39 @@ class Int8Linear(nn.Module):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, dtype=int8"
 
 
-def _int8_forward_impl(x: torch.Tensor, weight_int8: torch.Tensor,
-                       scale: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
-    """Implementation for INT8 forward - can be compiled."""
-    # Dequantize weight: int8 * scale -> fp16
+def _int8_forward_pytorch(x: torch.Tensor, weight_int8: torch.Tensor,
+                          scale: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
+    """PyTorch fallback - materializes full fp16 weight."""
     weight_fp16 = weight_int8.to(x.dtype) * scale.unsqueeze(1)
     return F.linear(x, weight_fp16, bias)
 
 
-# Use uncompiled version - torch.compile causes CUDA graph issues with dynamic shapes
-_int8_forward = _int8_forward_impl
+# Try to use fused Triton kernel, fall back to PyTorch
+_USE_FUSED_INT8 = False
+_int8_linear_fused = None
+
+try:
+    from .int8_gemm import int8_linear_fused as _int8_linear_fused
+    _USE_FUSED_INT8 = True
+except ImportError:
+    pass
+
+# Environment variable to control fused kernel usage
+# Set INT8_FUSED=1 to enable fused kernel (better for large batches)
+import os
+_FORCE_FUSED = os.environ.get("INT8_FUSED", "0") == "1"
+
+
+def _int8_forward(x: torch.Tensor, weight_int8: torch.Tensor,
+                  scale: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
+    """INT8 forward with fused kernel when available."""
+    # Fused kernel avoids temp memory but has launch overhead
+    # Use heuristic: fused for batch >= 4, PyTorch otherwise
+    use_fused = _USE_FUSED_INT8 and x.is_cuda and weight_int8.is_cuda
+    batch_size = x.numel() // x.shape[-1]
+    if use_fused and (_FORCE_FUSED or batch_size >= 4):
+        return _int8_linear_fused(x, weight_int8, scale, bias)
+    return _int8_forward_pytorch(x, weight_int8, scale, bias)
 
 
 class Int8Embedding(nn.Module):
