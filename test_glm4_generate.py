@@ -57,6 +57,8 @@ def main():
                         help="KV cache max sequence length (default: 2048)")
     parser.add_argument("--speculative", type=int, default=0, metavar="K",
                         help="Enable speculative decoding with K draft tokens (0=disabled)")
+    parser.add_argument("--int8-kv", action="store_true",
+                        help="Use INT8 KV cache (50%% memory savings)")
     args = parser.parse_args()
 
     # Clean up GPU memory
@@ -232,9 +234,11 @@ def main():
     kv_cache = None
     if not args.no_kv_cache:
         kv_cache = SimpleKVCache.from_model_config(
-            config, max_seq_len=args.kv_size, batch_size=1, device=device, dtype=dtype
+            config, max_seq_len=args.kv_size, batch_size=1, device=device, dtype=dtype,
+            use_int8=args.int8_kv,
         )
-        print(f"  KV cache: {kv_cache.memory_mb():.1f} MB")
+        kv_type = "INT8" if args.int8_kv else "FP16"
+        print(f"  KV cache ({kv_type}): {kv_cache.memory_mb():.1f} MB")
 
     # Tokenizer
     print("\nLoading tokenizer...")

@@ -31,6 +31,11 @@ class SimpleKVCache:
         K: [batch, num_kv_heads, max_seq_len, head_dim]
         V: [batch, num_kv_heads, max_seq_len, head_dim]
 
+    Supports optional INT8 quantization (50% memory savings):
+        - Per-position, per-head absmax scaling
+        - Quantize on update, dequantize on get
+        - Minimal quality impact for attention
+
     Usage:
         cache = SimpleKVCache.from_model_config(config, max_seq_len=2048)
 
@@ -55,6 +60,7 @@ class SimpleKVCache:
         batch_size: int = 1,
         device: torch.device = torch.device("cuda"),
         dtype: torch.dtype = torch.float16,
+        use_int8: bool = False,
     ):
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
@@ -63,14 +69,23 @@ class SimpleKVCache:
         self.batch_size = batch_size
         self.device = device
         self.dtype = dtype
+        self.use_int8 = use_int8
 
         # Current sequence length (tokens filled so far)
         self.cur_len = 0
+
+        # Storage dtype: int8 for quantized, fp16 otherwise
+        storage_dtype = torch.int8 if use_int8 else dtype
 
         # Preallocate K, V buffers for all layers
         # Shape: [batch, num_kv_heads, max_seq_len, head_dim]
         self.k_cache: List[torch.Tensor] = []
         self.v_cache: List[torch.Tensor] = []
+
+        # Scales for INT8 dequantization (per-position, per-head)
+        # Shape: [batch, num_kv_heads, max_seq_len, 1]
+        self.k_scale: List[torch.Tensor] = []
+        self.v_scale: List[torch.Tensor] = []
 
         for _ in range(num_layers):
             k = torch.zeros(
@@ -79,7 +94,7 @@ class SimpleKVCache:
                 max_seq_len,
                 head_dim,
                 device=device,
-                dtype=dtype,
+                dtype=storage_dtype,
             )
             v = torch.zeros(
                 batch_size,
@@ -87,10 +102,34 @@ class SimpleKVCache:
                 max_seq_len,
                 head_dim,
                 device=device,
-                dtype=dtype,
+                dtype=storage_dtype,
             )
             self.k_cache.append(k)
             self.v_cache.append(v)
+
+            if use_int8:
+                k_s = torch.ones(
+                    batch_size, num_kv_heads, max_seq_len, 1,
+                    device=device, dtype=torch.float16,
+                )
+                v_s = torch.ones(
+                    batch_size, num_kv_heads, max_seq_len, 1,
+                    device=device, dtype=torch.float16,
+                )
+                self.k_scale.append(k_s)
+                self.v_scale.append(v_s)
+
+    def _quantize_int8(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize tensor to INT8 with per-position, per-head scaling."""
+        # tensor: [batch, num_heads, seq_len, head_dim]
+        absmax = tensor.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+        scale = absmax / 127.0
+        quantized = (tensor / scale).round().clamp(-128, 127).to(torch.int8)
+        return quantized, scale.to(torch.float16)
+
+    def _dequantize_int8(self, quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Dequantize INT8 tensor back to fp16."""
+        return quantized.to(self.dtype) * scale
 
     def update(
         self,
@@ -116,9 +155,18 @@ class SimpleKVCache:
                 f"Sequence length {end_pos} exceeds max {self.max_seq_len}"
             )
 
-        # In-place write
-        self.k_cache[layer_idx][:, :, start_pos:end_pos, :] = k
-        self.v_cache[layer_idx][:, :, start_pos:end_pos, :] = v
+        if self.use_int8:
+            # Quantize and store
+            k_q, k_s = self._quantize_int8(k)
+            v_q, v_s = self._quantize_int8(v)
+            self.k_cache[layer_idx][:, :, start_pos:end_pos, :] = k_q
+            self.v_cache[layer_idx][:, :, start_pos:end_pos, :] = v_q
+            self.k_scale[layer_idx][:, :, start_pos:end_pos, :] = k_s
+            self.v_scale[layer_idx][:, :, start_pos:end_pos, :] = v_s
+        else:
+            # Direct fp16 store
+            self.k_cache[layer_idx][:, :, start_pos:end_pos, :] = k
+            self.v_cache[layer_idx][:, :, start_pos:end_pos, :] = v
 
     def get(
         self,
@@ -133,16 +181,27 @@ class SimpleKVCache:
             length: How many positions to return (default: cur_len)
 
         Returns:
-            k: [batch, num_kv_heads, length, head_dim]
-            v: [batch, num_kv_heads, length, head_dim]
+            k: [batch, num_kv_heads, length, head_dim] in fp16
+            v: [batch, num_kv_heads, length, head_dim] in fp16
         """
         if length is None:
             length = self.cur_len
 
-        return (
-            self.k_cache[layer_idx][:, :, :length, :],
-            self.v_cache[layer_idx][:, :, :length, :],
-        )
+        if self.use_int8:
+            # Dequantize on read
+            k_q = self.k_cache[layer_idx][:, :, :length, :]
+            v_q = self.v_cache[layer_idx][:, :, :length, :]
+            k_s = self.k_scale[layer_idx][:, :, :length, :]
+            v_s = self.v_scale[layer_idx][:, :, :length, :]
+            return (
+                self._dequantize_int8(k_q, k_s),
+                self._dequantize_int8(v_q, v_s),
+            )
+        else:
+            return (
+                self.k_cache[layer_idx][:, :, :length, :],
+                self.v_cache[layer_idx][:, :, :length, :],
+            )
 
     def set_len(self, length: int) -> None:
         """Set current sequence length (after prefill)."""
@@ -159,14 +218,35 @@ class SimpleKVCache:
 
     def memory_mb(self) -> float:
         """Return total memory used by cache in MB."""
-        per_layer_bytes = (
-            2  # K + V
-            * self.batch_size
-            * self.num_kv_heads
-            * self.max_seq_len
-            * self.head_dim
-            * 2  # fp16
-        )
+        if self.use_int8:
+            # INT8 K, V: 1 byte each
+            kv_bytes = (
+                2  # K + V
+                * self.batch_size
+                * self.num_kv_heads
+                * self.max_seq_len
+                * self.head_dim
+                * 1  # int8
+            )
+            # Scales: fp16, one per head per position
+            scale_bytes = (
+                2  # K + V scales
+                * self.batch_size
+                * self.num_kv_heads
+                * self.max_seq_len
+                * 1  # single value
+                * 2  # fp16
+            )
+            per_layer_bytes = kv_bytes + scale_bytes
+        else:
+            per_layer_bytes = (
+                2  # K + V
+                * self.batch_size
+                * self.num_kv_heads
+                * self.max_seq_len
+                * self.head_dim
+                * 2  # fp16
+            )
         return (per_layer_bytes * self.num_layers) / (1024 * 1024)
 
     @classmethod
@@ -177,8 +257,21 @@ class SimpleKVCache:
         batch_size: int = 1,
         device: torch.device = torch.device("cuda"),
         dtype: torch.dtype = torch.float16,
+        use_int8: bool = False,
     ) -> "SimpleKVCache":
-        """Create KV cache from model config (Mixtral or GLM4)."""
+        """Create KV cache from model config (Mixtral or GLM4).
+
+        Args:
+            model_config: Model configuration
+            max_seq_len: Maximum sequence length
+            batch_size: Batch size
+            device: Device for cache tensors
+            dtype: Data type for fp16 mode (ignored if use_int8=True)
+            use_int8: Use INT8 quantization (50% memory savings)
+
+        Returns:
+            SimpleKVCache instance
+        """
         return cls(
             num_layers=model_config.num_layers,
             num_kv_heads=model_config.num_kv_heads,
@@ -187,6 +280,7 @@ class SimpleKVCache:
             batch_size=batch_size,
             device=device,
             dtype=dtype,
+            use_int8=use_int8,
         )
 
 
