@@ -59,7 +59,28 @@ def main():
                         help="Enable speculative decoding with K draft tokens (0=disabled)")
     parser.add_argument("--int8-kv", action="store_true",
                         help="Use INT8 KV cache (50%% memory savings)")
+    parser.add_argument("--16gb", action="store_true", dest="gpu_16gb",
+                        help="Optimize for 16GB GPU: INT4 all weights, INT8 KV, 2 slots, 1024 ctx")
+    parser.add_argument("--24gb", action="store_true", dest="gpu_24gb",
+                        help="Optimize for 24GB GPU: INT8 weights, INT8 KV, 10 slots, 2048 ctx")
     args = parser.parse_args()
+
+    # Apply GPU presets
+    if args.gpu_16gb:
+        print("\n[16GB GPU preset: INT4 all weights, INT8 KV, 1 slot, 1024 ctx]")
+        print("  Note: Low expert cache (1 slot/layer) = ~6% hit rate. Slower but fits in VRAM.")
+        args.int4 = True
+        args.int8_kv = True
+        if args.slots == 8:  # Only override if default
+            args.slots = 1  # Minimal cache to fit in 16GB
+        if args.kv_size == 2048:  # Only override if default
+            args.kv_size = 1024
+    elif args.gpu_24gb:
+        print("\n[24GB GPU preset: INT8 weights, INT8 KV, 10 slots, 2048 ctx]")
+        args.int8 = True
+        args.int8_kv = True
+        if args.slots == 8:
+            args.slots = 10
 
     # Clean up GPU memory
     gc.collect()
@@ -82,6 +103,69 @@ def main():
 
     # Config
     config = GLM4AirConfig()
+
+    # Estimate memory before loading
+    def estimate_memory(config, args):
+        """Estimate VRAM usage for the given configuration."""
+        # Base costs (GB)
+        cuda_overhead = 1.5
+        embed_lm = 2.48  # Embeddings + LM head (FP16, not quantized)
+
+        # Attention: 4.53 GB FP16
+        if args.int4:
+            attention = 4.53 * 0.27  # INT4 ~27% of FP16
+        elif args.int8:
+            attention = 4.53 * 0.5   # INT8 ~50% of FP16
+        else:
+            attention = 4.53
+
+        # Shared experts: 15.87 GB FP16, 59 layers
+        if args.int4:
+            shared_experts = 15.87 * 0.26  # INT4 ~26% of FP16
+        elif args.int8:
+            shared_experts = 15.87 * 0.5
+        else:
+            shared_experts = 15.87
+
+        # Routers + layer norms (small, FP16)
+        misc = 0.07
+
+        # KV cache
+        kv_per_1k = 0.126 if not args.int8_kv else 0.064
+        kv_cache = kv_per_1k * (args.kv_size / 1024)
+
+        # Expert cache
+        expert_slot_size = 0.069  # GB per slot (INT4)
+        expert_cache = args.slots * config.num_moe_layers * expert_slot_size
+
+        total = cuda_overhead + embed_lm + attention + shared_experts + misc + kv_cache + expert_cache
+        return {
+            'cuda_overhead': cuda_overhead,
+            'embed_lm': embed_lm,
+            'attention': attention,
+            'shared_experts': shared_experts,
+            'misc': misc,
+            'kv_cache': kv_cache,
+            'expert_cache': expert_cache,
+            'total': total,
+        }
+
+    mem_est = estimate_memory(config, args)
+    print(f"\nEstimated VRAM usage:")
+    print(f"  CUDA overhead:    {mem_est['cuda_overhead']:.2f} GB")
+    print(f"  Embed + LM head:  {mem_est['embed_lm']:.2f} GB")
+    print(f"  Attention:        {mem_est['attention']:.2f} GB")
+    print(f"  Shared experts:   {mem_est['shared_experts']:.2f} GB")
+    print(f"  KV cache:         {mem_est['kv_cache']:.2f} GB")
+    print(f"  Expert cache:     {mem_est['expert_cache']:.2f} GB ({args.slots} slots × {config.num_moe_layers} layers)")
+    print(f"  TOTAL:            {mem_est['total']:.2f} GB")
+
+    free_b, total_b = torch.cuda.mem_get_info()
+    gpu_total = total_b / 1e9
+    print(f"\n  GPU total:        {gpu_total:.1f} GB")
+    if mem_est['total'] > gpu_total * 0.95:
+        print(f"  WARNING: Estimated usage ({mem_est['total']:.1f} GB) may exceed GPU memory!")
+        print(f"           Consider: --16gb preset, fewer --slots, or smaller --kv-size")
 
     # Optionally limit layers for memory-constrained testing
     if args.max_layers is not None:
