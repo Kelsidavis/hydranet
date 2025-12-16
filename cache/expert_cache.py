@@ -276,7 +276,7 @@ class PerLayerCache:
 
     def _swap_slots(self, src: SlotInfo, dst: SlotInfo):
         """Swap contents of two slots (for promotion/demotion)."""
-        # Swap GPU weights
+        # Swap GPU weights (fp16 dequantized)
         src_weights = self.gpu_weights.get(src.slot_idx)
         dst_weights = self.gpu_weights.get(dst.slot_idx)
 
@@ -289,6 +289,20 @@ class PerLayerCache:
             self.gpu_weights[src.slot_idx] = dst_weights
         elif src.slot_idx in self.gpu_weights:
             del self.gpu_weights[src.slot_idx]
+
+        # Swap GPU INT4 slots
+        src_int4 = self.gpu_int4_slots.get(src.slot_idx)
+        dst_int4 = self.gpu_int4_slots.get(dst.slot_idx)
+
+        if src_int4:
+            self.gpu_int4_slots[dst.slot_idx] = src_int4
+        elif dst.slot_idx in self.gpu_int4_slots:
+            del self.gpu_int4_slots[dst.slot_idx]
+
+        if dst_int4:
+            self.gpu_int4_slots[src.slot_idx] = dst_int4
+        elif src.slot_idx in self.gpu_int4_slots:
+            del self.gpu_int4_slots[src.slot_idx]
 
         # Update expert mappings
         src_expert = src.expert_id
