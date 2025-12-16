@@ -51,6 +51,8 @@ def main():
                         help="Use INT4 for non-expert weights (saves ~75% VRAM, more quality loss)")
     parser.add_argument("--hybrid", action="store_true",
                         help="Use INT8 for attention, INT4 for MLP (balanced speed/memory)")
+    parser.add_argument("--fp16-experts", action="store_true",
+                        help="Use FP16 cuBLAS for expert compute (4x faster, but caches dequantized weights)")
     parser.add_argument("--kv-size", type=int, default=2048,
                         help="KV cache max sequence length (default: 2048)")
     args = parser.parse_args()
@@ -214,6 +216,11 @@ def main():
         load_time = time.perf_counter() - load_start
         print(f"  Loaded in {load_time:.1f}s")
         model.expert_cache.set_packed_store(packed_store)
+
+        # Enable FP16 compute mode if requested (uses cuBLAS instead of INT4 Triton)
+        if args.fp16_experts:
+            model.expert_cache.use_fp16_compute = True
+            print("  FP16 expert compute enabled (dequant + cuBLAS)")
     else:
         print(f"\nWarning: No packed experts at {packed_dir}")
         print("  Run pack_glm4.py first to create INT4 experts")

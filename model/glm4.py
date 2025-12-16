@@ -398,16 +398,27 @@ class GLM4MoELayer(nn.Module):
             expert_input = flat_hidden[token_indices]
 
             if use_fused_int4:
-                from ..kernels.int4_gemm import expert_mlp_int4_fused
-
                 slot = self.cache_manager.get_int4_slot(self.layer_idx, expert_idx)
-                expert_out = expert_mlp_int4_fused(
-                    expert_input,
-                    slot.gate_packed, slot.gate_scales,
-                    slot.up_packed, slot.up_scales,
-                    slot.down_packed, slot.down_scales,
-                    group_size=slot.group_size,
-                )
+
+                # Check if we should use FP16 compute (dequant + cuBLAS) instead of INT4 fused
+                use_fp16_compute = getattr(self.cache_manager, 'use_fp16_compute', False)
+
+                if use_fp16_compute:
+                    # Dequantize to FP16 and use cuBLAS (4x faster for small batches)
+                    weights = slot.dequantize()
+                    gate_out = F.silu(F.linear(expert_input, weights["gate_proj"]))
+                    up_out = F.linear(expert_input, weights["up_proj"])
+                    expert_out = F.linear(gate_out * up_out, weights["down_proj"])
+                else:
+                    # Use INT4 fused Triton kernel (slower but no FP16 memory overhead)
+                    from ..kernels.int4_gemm import expert_mlp_int4_fused
+                    expert_out = expert_mlp_int4_fused(
+                        expert_input,
+                        slot.gate_packed, slot.gate_scales,
+                        slot.up_packed, slot.up_scales,
+                        slot.down_packed, slot.down_scales,
+                        group_size=slot.group_size,
+                    )
             else:
                 weights = self.cache_manager.get_expert_weights(self.layer_idx, expert_idx)
                 gate_out = F.silu(F.linear(expert_input, weights["gate_proj"]))
