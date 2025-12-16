@@ -25,7 +25,8 @@ def main():
     from hydranet.kernels.int4_linear import convert_model_to_int4, estimate_int4_memory
 
     parser = argparse.ArgumentParser(description="GLM-4.5-Air generation test")
-    parser.add_argument("--model-path", type=str, required=True,
+    parser.add_argument("--model-path", type=str,
+                        default="/media/k/2tb nvme/models/glm4-air",
                         help="Path to GLM-4.5-Air weights")
     parser.add_argument("--packed-dir", type=str, default=None,
                         help="Path to packed INT4 experts (default: model_path/packed_int4)")
@@ -65,20 +66,22 @@ def main():
                         help="Optimize for 24GB GPU: INT8 weights, INT8 KV, 10 slots, 2048 ctx")
     parser.add_argument("--decode-skip", type=float, default=0.0, metavar="RATIO",
                         help="Skip RATIO of MoE layers during decode (0.5 = 2x speedup, quality tradeoff)")
+    parser.add_argument("--quantize-all", action="store_true",
+                        help="Also quantize lm_head (saves 0.6GB but may hurt output quality)")
     args = parser.parse_args()
 
     # Apply GPU presets
     if args.gpu_16gb:
-        print("\n[16GB GPU preset: INT4 all, INT8 KV, 1 slot, 1024 ctx, 50% decode skip]")
-        print("  Note: 50% layer skip during decode gives ~2x speedup with quality tradeoff.")
+        print("\n[16GB GPU preset: INT4 all, INT8 KV, 15 slots, 1024 ctx, 25% decode skip]")
+        print("  Expected: ~1.3 tok/s, ~32% cache hit rate, ~15.4GB VRAM")
         args.int4 = True
         args.int8_kv = True
         if args.slots == 8:  # Only override if default
-            args.slots = 1  # Minimal cache to fit in 16GB
+            args.slots = 15  # Maximum hit rate while fitting in 16GB
         if args.kv_size == 2048:  # Only override if default
             args.kv_size = 1024
         if args.decode_skip == 0.0:  # Only override if default
-            args.decode_skip = 0.5  # 50% skip = ~2x decode speedup
+            args.decode_skip = 0.25  # 25% skip = better quality vs 50%
     elif args.gpu_24gb:
         print("\n[24GB GPU preset: INT8 weights, INT8 KV, 10 slots, 2048 ctx]")
         args.int8 = True
@@ -138,9 +141,11 @@ def main():
         kv_per_1k = 0.126 if not args.int8_kv else 0.064
         kv_cache = kv_per_1k * (args.kv_size / 1024)
 
-        # Expert cache
-        expert_slot_size = 0.069  # GB per slot (INT4)
-        expert_cache = args.slots * config.num_moe_layers * expert_slot_size
+        # Expert cache (lazy allocation - slots created on demand during inference)
+        # Empirical: with INT4, actual usage is ~3GB base + ~0.13GB per additional slot
+        # (not linearly scaling because eviction keeps active set bounded)
+        expert_cache_base = 3.1  # Base with 1 slot
+        expert_cache = expert_cache_base + max(0, args.slots - 1) * 0.13
 
         total = cuda_overhead + embed_lm + attention + shared_experts + misc + kv_cache + expert_cache
         return {
@@ -252,9 +257,15 @@ def main():
         print("\n  Converting to hybrid INT8/INT4...")
         # INT8 for attention projections (hot path), INT4 for rest
         # First convert everything to INT4
-        convert_model_to_int4(model, skip_layers=["lm_head", "embed_tokens", "q_proj", "k_proj", "v_proj", "o_proj"])
+        skip_mlp = ["embed_tokens", "q_proj", "k_proj", "v_proj", "o_proj"]
+        if not args.quantize_all:
+            skip_mlp.insert(0, "lm_head")
+        convert_model_to_int4(model, skip_layers=skip_mlp)
         # Then convert attention projections to INT8 (overwrite INT4)
-        convert_model_to_int8(model, skip_layers=["lm_head", "shared_expert", "gate", "mlp"])
+        skip_attn = ["shared_expert", "gate", "mlp"]
+        if not args.quantize_all:
+            skip_attn.insert(0, "lm_head")
+        convert_model_to_int8(model, skip_layers=skip_attn)
         gc.collect()
         print("  Hybrid conversion complete (INT8 attention, INT4 MLP)")
     elif args.int4:
@@ -263,8 +274,9 @@ def main():
         print(f"    fp16: {mem_estimate['fp16_mb']:.0f} MB -> int4: {mem_estimate['int4_mb']:.0f} MB")
         print(f"    Savings: {mem_estimate['savings_mb']:.0f} MB ({mem_estimate['savings_mb']/mem_estimate['fp16_mb']*100:.0f}%)")
 
-        # Skip lm_head and embeddings to preserve output quality
-        convert_model_to_int4(model, skip_layers=["lm_head", "embed_tokens"])
+        # Skip embeddings; optionally skip lm_head to preserve output quality
+        skip_layers = ["embed_tokens"] if args.quantize_all else ["lm_head", "embed_tokens"]
+        convert_model_to_int4(model, skip_layers=skip_layers)
         gc.collect()
         print("  INT4 conversion complete")
     elif args.int8:
@@ -273,8 +285,9 @@ def main():
         print(f"    fp16: {mem_estimate['fp16_mb']:.0f} MB -> int8: {mem_estimate['int8_mb']:.0f} MB")
         print(f"    Savings: {mem_estimate['savings_mb']:.0f} MB ({mem_estimate['savings_mb']/mem_estimate['fp16_mb']*100:.0f}%)")
 
-        # Skip lm_head to preserve output quality
-        convert_model_to_int8(model, skip_layers=["lm_head"])
+        # Optionally skip lm_head to preserve output quality
+        skip_layers = [] if args.quantize_all else ["lm_head"]
+        convert_model_to_int8(model, skip_layers=skip_layers)
         gc.collect()
         print("  INT8 conversion complete")
 
