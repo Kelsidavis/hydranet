@@ -115,15 +115,22 @@ class Int8Linear(nn.Module):
         Returns:
             (*, out_features) output tensor
         """
-        # Dequantize weight: int8 * scale -> fp16
-        # weight_int8: (out, in), scale: (out,)
-        weight_fp16 = self.weight_int8.to(x.dtype) * self.weight_scale.unsqueeze(1)
-
-        # Standard linear
-        return F.linear(x, weight_fp16, self.bias)
+        return _int8_forward(x, self.weight_int8, self.weight_scale, self.bias)
 
     def extra_repr(self) -> str:
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, dtype=int8"
+
+
+def _int8_forward_impl(x: torch.Tensor, weight_int8: torch.Tensor,
+                       scale: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
+    """Implementation for INT8 forward - can be compiled."""
+    # Dequantize weight: int8 * scale -> fp16
+    weight_fp16 = weight_int8.to(x.dtype) * scale.unsqueeze(1)
+    return F.linear(x, weight_fp16, bias)
+
+
+# Use uncompiled version - torch.compile causes CUDA graph issues with dynamic shapes
+_int8_forward = _int8_forward_impl
 
 
 class Int8Embedding(nn.Module):

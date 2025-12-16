@@ -46,6 +46,8 @@ def main():
                         help="Limit number of layers (for memory-constrained testing)")
     parser.add_argument("--int8", action="store_true",
                         help="Use INT8 for non-expert weights (saves ~50% VRAM)")
+    parser.add_argument("--kv-size", type=int, default=2048,
+                        help="KV cache max sequence length (default: 2048)")
     args = parser.parse_args()
 
     # Clean up GPU memory
@@ -79,7 +81,7 @@ def main():
         pinned_slots=0,
         hot_slots=args.slots // 2 + args.slots % 2,
         probation_slots=args.slots // 2,
-        enable_prefetch=False,
+        enable_prefetch=True,  # Enable async prefetch for overlap
     )
 
     print(f"\nModel config:")
@@ -196,7 +198,7 @@ def main():
     kv_cache = None
     if not args.no_kv_cache:
         kv_cache = SimpleKVCache.from_model_config(
-            config, max_seq_len=2048, batch_size=1, device=device, dtype=dtype
+            config, max_seq_len=args.kv_size, batch_size=1, device=device, dtype=dtype
         )
         print(f"  KV cache: {kv_cache.memory_mb():.1f} MB")
 
