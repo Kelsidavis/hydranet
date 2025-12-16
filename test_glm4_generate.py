@@ -55,6 +55,8 @@ def main():
                         help="Use FP16 cuBLAS for expert compute (4x faster, but caches dequantized weights)")
     parser.add_argument("--kv-size", type=int, default=2048,
                         help="KV cache max sequence length (default: 2048)")
+    parser.add_argument("--speculative", type=int, default=0, metavar="K",
+                        help="Enable speculative decoding with K draft tokens (0=disabled)")
     args = parser.parse_args()
 
     # Clean up GPU memory
@@ -272,49 +274,75 @@ def main():
     token_times = []
     prefill_time = 0
     generated = input_ids.clone()
+    spec_stats = None
 
-    with torch.no_grad():
-        for i in range(args.tokens):
-            t_start = time.perf_counter()
+    # Use speculative decoding if requested
+    if args.speculative > 0 and kv_cache is not None:
+        from hydranet.inference.speculative import speculative_generate
+        print(f"  Using speculative decoding with {args.speculative} draft tokens")
 
-            if kv_cache is not None:
-                if i == 0:
-                    curr_input = generated  # Prefill
+        t_start = time.perf_counter()
+        generated, spec_stats = speculative_generate(
+            model=model,
+            tokenizer=tokenizer,
+            input_ids=input_ids,
+            kv_cache=kv_cache,
+            max_new_tokens=args.tokens,
+            num_speculative=args.speculative,
+            temperature=0.0,
+            verbose=args.profile,
+        )
+        t_end = time.perf_counter()
+
+        total_time = (t_end - t_start) * 1000
+        new_tokens = generated.shape[1] - input_ids.shape[1]
+        prefill_time = total_time * 0.1  # Rough estimate
+        token_times = [(total_time - prefill_time) / max(1, new_tokens - 1)] * max(0, new_tokens - 1)
+
+    else:
+        # Standard autoregressive decoding
+        with torch.no_grad():
+            for i in range(args.tokens):
+                t_start = time.perf_counter()
+
+                if kv_cache is not None:
+                    if i == 0:
+                        curr_input = generated  # Prefill
+                    else:
+                        curr_input = next_token  # Decode
+
+                    logits, _ = model.forward(curr_input, kv_cache=kv_cache)
+
+                    # Update KV cache position tracking
+                    if i == 0:
+                        kv_cache.set_len(curr_input.shape[1])  # After prefill
+                    else:
+                        kv_cache.advance(1)  # After each decode step
                 else:
-                    curr_input = next_token  # Decode
+                    logits, _ = model.forward(generated)
 
-                logits, _ = model.forward(curr_input, kv_cache=kv_cache)
+                # Greedy decode
+                next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                generated = torch.cat([generated, next_token], dim=1)
 
-                # Update KV cache position tracking
+                t_end = time.perf_counter()
+                elapsed_ms = (t_end - t_start) * 1000
+
                 if i == 0:
-                    kv_cache.set_len(curr_input.shape[1])  # After prefill
+                    prefill_time = elapsed_ms
                 else:
-                    kv_cache.advance(1)  # After each decode step
-            else:
-                logits, _ = model.forward(generated)
+                    token_times.append(elapsed_ms)
 
-            # Greedy decode
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_token], dim=1)
+                # Decode and print
+                if tokenizer:
+                    token_str = tokenizer.decode(next_token[0])
+                else:
+                    token_str = f"<{next_token.item()}>"
 
-            t_end = time.perf_counter()
-            elapsed_ms = (t_end - t_start) * 1000
-
-            if i == 0:
-                prefill_time = elapsed_ms
-            else:
-                token_times.append(elapsed_ms)
-
-            # Decode and print
-            if tokenizer:
-                token_str = tokenizer.decode(next_token[0])
-            else:
-                token_str = f"<{next_token.item()}>"
-
-            if args.profile:
-                print(f"  {i+1}. '{token_str}' ({elapsed_ms:.0f}ms)")
-            else:
-                print(f"  {i+1}. Token {next_token.item()}: '{token_str}'")
+                if args.profile:
+                    print(f"  {i+1}. '{token_str}' ({elapsed_ms:.0f}ms)")
+                else:
+                    print(f"  {i+1}. Token {next_token.item()}: '{token_str}'")
 
     # Stats
     total_time = prefill_time + sum(token_times)
@@ -348,6 +376,14 @@ def main():
             print(f"\n  TIME BREAKDOWN (decode only):")
             print(f"    Expert loading: {total_load_ms:.0f}ms ({100*total_load_ms/total_decode_ms:.1f}%)")
             print(f"    Compute: {total_decode_ms - total_load_ms:.0f}ms ({100*(1-total_load_ms/total_decode_ms):.1f}%)")
+
+    # Speculative decoding stats
+    if spec_stats is not None:
+        print(f"\nSPECULATIVE DECODING")
+        print(f"  Acceptance rate: {spec_stats['acceptance_rate']:.1%}")
+        print(f"  Avg tokens/step: {spec_stats['avg_tokens_per_step']:.2f}")
+        print(f"  Total drafted: {spec_stats['total_drafted']}, accepted: {spec_stats['total_accepted']}")
+        print(f"  Draft time: {spec_stats['draft_time_ms']:.1f}ms, Verify time: {spec_stats['verify_time_ms']:.1f}ms")
 
     print(f"\nFinal GPU memory: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 
