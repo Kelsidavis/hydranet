@@ -60,21 +60,25 @@ def main():
     parser.add_argument("--int8-kv", action="store_true",
                         help="Use INT8 KV cache (50%% memory savings)")
     parser.add_argument("--16gb", action="store_true", dest="gpu_16gb",
-                        help="Optimize for 16GB GPU: INT4 all weights, INT8 KV, 2 slots, 1024 ctx")
+                        help="Optimize for 16GB GPU: INT4 all weights, INT8 KV, 1 slot, 1024 ctx")
     parser.add_argument("--24gb", action="store_true", dest="gpu_24gb",
                         help="Optimize for 24GB GPU: INT8 weights, INT8 KV, 10 slots, 2048 ctx")
+    parser.add_argument("--decode-skip", type=float, default=0.0, metavar="RATIO",
+                        help="Skip RATIO of MoE layers during decode (0.5 = 2x speedup, quality tradeoff)")
     args = parser.parse_args()
 
     # Apply GPU presets
     if args.gpu_16gb:
-        print("\n[16GB GPU preset: INT4 all weights, INT8 KV, 1 slot, 1024 ctx]")
-        print("  Note: Low expert cache (1 slot/layer) = ~6% hit rate. Slower but fits in VRAM.")
+        print("\n[16GB GPU preset: INT4 all, INT8 KV, 1 slot, 1024 ctx, 50% decode skip]")
+        print("  Note: 50% layer skip during decode gives ~2x speedup with quality tradeoff.")
         args.int4 = True
         args.int8_kv = True
         if args.slots == 8:  # Only override if default
             args.slots = 1  # Minimal cache to fit in 16GB
         if args.kv_size == 2048:  # Only override if default
             args.kv_size = 1024
+        if args.decode_skip == 0.0:  # Only override if default
+            args.decode_skip = 0.5  # 50% skip = ~2x decode speedup
     elif args.gpu_24gb:
         print("\n[24GB GPU preset: INT8 weights, INT8 KV, 10 slots, 2048 ctx]")
         args.int8 = True
@@ -187,11 +191,14 @@ def main():
 
     # Initialize model
     print("\nInitializing model...")
+    if args.decode_skip > 0:
+        print(f"  Decode layer skipping: {args.decode_skip*100:.0f}% of MoE layers")
     model = OffloadedGLM4(
         config=config,
         cache_config=cache_config,
         device=device,
         dtype=dtype,
+        decode_skip_ratio=args.decode_skip,
     )
     print(f"  After init: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 

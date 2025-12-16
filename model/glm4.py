@@ -362,16 +362,24 @@ class GLM4MoELayer(nn.Module):
         """Return experts selected in the last forward pass (for cross-layer prediction)."""
         return self._last_selected_experts
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, skip_routed: bool = False) -> torch.Tensor:
         """
         Forward through MoE layer.
 
         Output = shared_expert(x) + sum(weight_i * routed_expert_i(x))
+
+        Args:
+            hidden_states: Input tensor [batch, seq, hidden_dim]
+            skip_routed: If True, only run shared expert (faster decode mode)
         """
         batch_size, seq_len, hidden_dim = hidden_states.shape
 
         # Shared expert output (always computed)
         shared_output = self.shared_expert(hidden_states)
+
+        # Fast path: skip routed experts (for layer skipping during decode)
+        if skip_routed:
+            return shared_output
 
         # Route tokens to experts
         expert_indices, expert_weights = self.router(hidden_states)  # (batch*seq, top_k)
@@ -510,9 +518,10 @@ class GLM4Block(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional["SimpleKVCache"] = None,
         predicted_experts: Optional[list] = None,
+        skip_routed: bool = False,
     ) -> torch.Tensor:
         # Start prefetching predicted experts BEFORE attention (overlap)
-        if predicted_experts and self.is_moe:
+        if predicted_experts and self.is_moe and not skip_routed:
             self.prefetch_experts(predicted_experts)
 
         # Self-attention with residual
@@ -529,7 +538,12 @@ class GLM4Block(nn.Module):
         # FFN with residual
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        if self.is_moe and hasattr(self.mlp, 'forward'):
+            # MoE layer - pass skip_routed flag
+            hidden_states = self.mlp(hidden_states, skip_routed=skip_routed)
+        else:
+            # Dense layer
+            hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -542,6 +556,11 @@ class OffloadedGLM4(nn.Module):
     - First layer is dense
     - Remaining 45 layers are MoE with 128 routed + 1 shared expert
     - Expert weights offloaded to RAM, loaded on demand
+
+    Layer Skipping (for 16GB GPUs):
+    - Set decode_skip_ratio to skip some MoE layers during decode
+    - Skipped layers still run attention and shared expert, just not routed experts
+    - Trade quality for speed: 50% skip gives ~2x decode speedup
     """
 
     def __init__(
@@ -551,11 +570,27 @@ class OffloadedGLM4(nn.Module):
         kv_config: Optional[object] = None,
         device: torch.device = torch.device("cuda"),
         dtype: torch.dtype = torch.float16,
+        decode_skip_ratio: float = 0.0,
     ):
         super().__init__()
         self.config = config
         self.device = device
         self.dtype = dtype
+        self.decode_skip_ratio = decode_skip_ratio
+
+        # Compute which layers to skip during decode
+        # Skip evenly distributed layers for minimal quality impact
+        num_moe = config.num_layers - config.first_k_dense_replace
+        num_skip = int(num_moe * decode_skip_ratio)
+        if num_skip > 0:
+            # Skip every N-th layer
+            skip_interval = num_moe // num_skip
+            self._skip_layers = set(
+                config.first_k_dense_replace + i * skip_interval
+                for i in range(num_skip)
+            )
+        else:
+            self._skip_layers = set()
 
         # Token embeddings
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_dim)
@@ -655,19 +690,27 @@ class OffloadedGLM4(nn.Module):
         # Embeddings
         hidden_states = self.embed_tokens(input_ids)
 
+        # Detect decode mode: single token with KV cache
+        is_decode = seq_len == 1 and kv_cache is not None and kv_cache.cur_len > 0
+
         # Transformer layers with cross-layer expert prefetching
         predicted_experts = None  # No prediction for first layer
-        for layer in self.layers:
+        for layer_idx, layer in enumerate(self.layers):
+            # Skip routed experts during decode for selected layers
+            skip_routed = is_decode and layer_idx in self._skip_layers
+
             hidden_states = layer(
                 hidden_states,
                 position_ids=position_ids,
                 attention_mask=attention_mask,
                 kv_cache=kv_cache,
                 predicted_experts=predicted_experts,
+                skip_routed=skip_routed,
             )
             # Get selected experts for cross-layer prediction
             # Next layer will prefetch these while running attention
-            predicted_experts = layer.get_last_selected_experts()
+            if not skip_routed:
+                predicted_experts = layer.get_last_selected_experts()
 
         # Output
         hidden_states = self.norm(hidden_states)
