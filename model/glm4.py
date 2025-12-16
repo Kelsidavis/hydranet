@@ -315,6 +315,10 @@ class GLM4MoELayer(nn.Module):
 
     128 routed experts + 1 shared expert per layer.
     Top-8 sigmoid routing.
+
+    Optimization: Cross-layer prefetching
+    - Stores last selected experts for next layer to prefetch speculatively
+    - Expert selection is often correlated between adjacent layers
     """
 
     def __init__(
@@ -327,6 +331,8 @@ class GLM4MoELayer(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
         self.cache_manager = cache_manager
+        # Store last selected experts for cross-layer prediction
+        self._last_selected_experts: list = []
 
         # Router (on GPU)
         self.router = GLM4SigmoidRouter(config, layer_idx)
@@ -336,6 +342,25 @@ class GLM4MoELayer(nn.Module):
             config,
             intermediate_size=config.moe_intermediate_dim * config.num_shared_experts
         )
+
+    def prefetch_predicted(self, predicted_experts: list):
+        """
+        Speculatively prefetch experts based on prediction (e.g., from previous layer).
+
+        This is called BEFORE the forward pass to start loading experts in background
+        while attention is still computing.
+        """
+        if not self.cache_manager.use_packed_mode:
+            return
+
+        # Only prefetch experts not already cached
+        for expert_idx in predicted_experts:
+            if not self.cache_manager.is_cached(self.layer_idx, expert_idx):
+                self.cache_manager.prefetch_int4_slot(self.layer_idx, expert_idx)
+
+    def get_last_selected_experts(self) -> list:
+        """Return experts selected in the last forward pass (for cross-layer prediction)."""
+        return self._last_selected_experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
@@ -375,10 +400,11 @@ class GLM4MoELayer(nn.Module):
                 else:
                     misses.append(e)
 
-            # Prefetch misses
+            # Prefetch all misses upfront (async H2D starts immediately)
             for e in misses:
                 self.cache_manager.prefetch_int4_slot(self.layer_idx, e)
 
+            # Process hits first (while misses are loading in background)
             expert_order = hits + misses
         else:
             expert_order = unique_experts
@@ -431,6 +457,9 @@ class GLM4MoELayer(nn.Module):
             # Accumulate
             routed_output.index_add_(0, token_indices, expert_out * routing_weights)
 
+        # Store selected experts for cross-layer prediction
+        self._last_selected_experts = unique_experts
+
         # Combine shared + routed
         routed_output = routed_output.view(batch_size, seq_len, hidden_dim)
         return shared_output + routed_output
@@ -463,13 +492,29 @@ class GLM4Block(nn.Module):
         else:
             self.mlp = GLM4DenseMLP(config)
 
+    def prefetch_experts(self, predicted_experts: list):
+        """Speculatively prefetch experts based on prediction from previous layer."""
+        if self.is_moe and hasattr(self.mlp, 'prefetch_predicted'):
+            self.mlp.prefetch_predicted(predicted_experts)
+
+    def get_last_selected_experts(self) -> list:
+        """Get experts selected in last forward (for cross-layer prediction)."""
+        if self.is_moe and hasattr(self.mlp, 'get_last_selected_experts'):
+            return self.mlp.get_last_selected_experts()
+        return []
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional["SimpleKVCache"] = None,
+        predicted_experts: Optional[list] = None,
     ) -> torch.Tensor:
+        # Start prefetching predicted experts BEFORE attention (overlap)
+        if predicted_experts and self.is_moe:
+            self.prefetch_experts(predicted_experts)
+
         # Self-attention with residual
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -610,14 +655,19 @@ class OffloadedGLM4(nn.Module):
         # Embeddings
         hidden_states = self.embed_tokens(input_ids)
 
-        # Transformer layers
+        # Transformer layers with cross-layer expert prefetching
+        predicted_experts = None  # No prediction for first layer
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states,
                 position_ids=position_ids,
                 attention_mask=attention_mask,
                 kv_cache=kv_cache,
+                predicted_experts=predicted_experts,
             )
+            # Get selected experts for cross-layer prediction
+            # Next layer will prefetch these while running attention
+            predicted_experts = layer.get_last_selected_experts()
 
         # Output
         hidden_states = self.norm(hidden_states)
