@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hydranet"
+version = "2.1.0"
+description = "MoE Offloading Runtime for Consumer GPUs - GLM-4.5-Air Support"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "HydraNet Team"}
+]
+keywords = ["moe", "inference", "llm", "glm4", "quantization"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.35.0",
+    "safetensors>=0.4.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+hydranet = "cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Kelsidavis/hydranet"
+Repository = "https://github.com/Kelsidavis/hydranet"
+
+[tool.setuptools]
+packages = ["cache", "model", "kernels", "inference", "scheduler"]
+py-modules = ["cli", "config", "engine", "profiler"]
+
+[tool.setuptools.package-dir]
+"" = "."
+
+[tool.setuptools.package-data]
+"*" = ["*.md"]

@@ -3,6 +3,26 @@
 ## Project Overview
 HydraNet is a high-performance inference runtime for GLM-4.5-Air, a 32B parameter Mixture-of-Experts model with 128 routed experts per layer. Optimized for consumer GPUs (16GB+).
 
+## Installation
+```bash
+pip install -e .
+```
+
+## CLI Usage
+```bash
+# Quick start (16GB GPU)
+hydranet generate --16gb --prompt "Hello, how are you?"
+
+# Generate with custom settings
+hydranet generate --int4 --slots 15 --tokens 100 --prompt "Write a story"
+
+# Show system info
+hydranet info
+
+# Run benchmark
+hydranet bench --16gb
+```
+
 ## Key Features
 - INT4/INT8 weight quantization (74% memory savings)
 - INT8 KV cache (50% cache memory savings)
